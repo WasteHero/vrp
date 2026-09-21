@@ -7,6 +7,7 @@ use vrp_core::models::common::{Demand, LoadOps, MultiDimLoad, SingleDimLoad};
 use vrp_core::models::problem::{Actor, Single, TransportCost};
 use vrp_core::models::solution::Route;
 use vrp_core::models::{Feature, FeatureObjective, GoalBuilder, GoalContext, GoalContextBuilder};
+use crate::format::CoordIndex;
 use vrp_core::rosomaxa::evolution::objectives::dominance_order;
 
 pub(super) fn create_goal_context(
@@ -16,7 +17,7 @@ pub(super) fn create_goal_context(
 ) -> GenericResult<GoalContext> {
     // determine features from objective definition
     let feature_layers = get_objective_feature_layers(api_problem, blocks, props)?;
-    let (mut features, goal_builder) = get_features_with_goal(&feature_layers)?;
+    let (mut features, mut goal_builder) = get_features_with_goal(&feature_layers)?;
 
     if props.has_unreachable_locations {
         features.push(create_reachable_feature("reachable", blocks.transport.clone(), REACHABLE_CONSTRAINT_CODE)?)
@@ -67,6 +68,40 @@ pub(super) fn create_goal_context(
             TOUR_SIZE_CONSTRAINT_CODE,
             Arc::new(|actor| actor.vehicle.dimens.get_tour_size().copied()),
         )?);
+    }
+
+    // COMPASS-1429: street-reentry penalty. Off unless VRP_STREET_PENALTY>0.
+    // Snaps every location to a coarse grid cell (VRP_STREET_CELL_M metres) and
+    // penalises re-entering a cell after leaving it, so a street is finished in
+    // one pass. Universal (all tenants) once enabled via env in the vrp service.
+    // COMPASS-1429: street-leave penalty, folded into min_cost inside the engine.
+    // Snap every location to a VRP_STREET_CELL_M grid cell and register the map;
+    // the transport objective then charges crossing OUT of a cell, so the solver
+    // finishes a street cluster before leaving and does not return to it later.
+    // Env-gated (VRP_STREET_PENALTY, 0 = off). Universal for all tenants.
+    {
+        let penalty: f64 = std::env::var("VRP_STREET_PENALTY").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        if penalty > 0.0 {
+            let cell_m: f64 = std::env::var("VRP_STREET_CELL_M").ok().and_then(|v| v.parse().ok()).unwrap_or(45.0);
+            let coord_index = CoordIndex::new(api_problem);
+            let mut map: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
+            // enumerate all matrix location indices and snap each to a cell
+            let mut idx = 0usize;
+            while let Some(loc) = coord_index.get_by_idx(idx) {
+                if let crate::format::Location::Coordinate { .. } = loc {
+                    let (lat, lng) = loc.to_lat_lng();
+                    let mlat = 111_320.0_f64;
+                    let mlon = 111_320.0_f64 * lat.to_radians().cos();
+                    let gy = (lat * mlat / cell_m).round() as i64;
+                    let gx = (lng * mlon / cell_m).round() as i64;
+                    map.insert(idx, ((gy as u64) << 32) ^ ((gx as u64) & 0xffff_ffff));
+                }
+                idx += 1;
+            }
+            vrp_core::construction::features::set_street_cells(map, penalty);
+        } else {
+            vrp_core::construction::features::set_street_cells(std::collections::HashMap::new(), 0.0);
+        }
     }
 
     GoalContextBuilder::with_features(&features)?.set_main_goal(goal_builder.build()?).build()

@@ -61,6 +61,8 @@ mod transport;
 pub use self::transport::*;
 
 mod work_balance;
+mod street_cells;
+pub use self::street_cells::*;
 pub use self::work_balance::{
     create_activity_balanced_feature, create_distance_balanced_feature, create_duration_balanced_feature,
     create_max_load_balanced_feature,

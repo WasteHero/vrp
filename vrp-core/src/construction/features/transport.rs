@@ -325,7 +325,30 @@ impl TransportObjective {
 
         let old_costs = tp_cost_old + act_cost_old + waiting_cost;
 
-        new_costs - old_costs
+        // COMPASS-1429: fold a street-leave penalty into the cost. Crossing OUT
+        // of prev's cell into a different cell is charged in proportion to the
+        // road distance of that crossing leg, so the solver prefers to finish a
+        // cell (street cluster) before jumping to another and does not come back
+        // to it later. Within-cell moves are free. Factor 0 disables it.
+        let factor = super::street_penalty();
+        let penalty = if factor > 0. {
+            let pc = super::cell_of(prev.place.location);
+            let tc = super::cell_of(target.place.location);
+            if pc != u64::MAX && tc != u64::MAX && pc != tc {
+                let route = route_ctx.route();
+                let d = self.transport.distance(
+                    route, prev.place.location, target.place.location,
+                    TravelTime::Departure(prev.schedule.departure),
+                );
+                factor * d
+            } else {
+                0.
+            }
+        } else {
+            0.
+        };
+
+        new_costs - old_costs + penalty
     }
 
     fn analyze_route_leg(
